@@ -69,6 +69,7 @@ class HiddenObjects(nn.Module):
         theta_loc=None,  # prior on theta mean hyperparam
         theta_covmat=None,  # prior on theta covariance hyperparam
         noise_scale=None,  # this is the scale of the noise term
+        n=1,
         p=1,  # physical dimension
         K=1,  # number of sources
         T=2,  # number of experiments
@@ -85,7 +86,7 @@ class HiddenObjects(nn.Module):
         ).to_event(1)
         # Observations noise scale:
         self.noise_scale = noise_scale if noise_scale is not None else torch.tensor(1.0)
-        self.n = 1  # batch=1
+        self.n = n  # batch=1
         self.p = p  # dimension of theta (location finding example will be 1, 2 or 3).
         self.K = K  # number of sources
         self.T = T  # number of experiments
@@ -173,9 +174,10 @@ class HiddenObjects(nn.Module):
                     print(f"*True Theta: {true_theta}*")
                 run_xis = []
                 run_ys = []
+
                 # Print optimal designs, observations for given theta
                 for t in range(self.T):
-                    xi = trace.nodes[f"xi{t + 1}"]["value"].cpu().reshape(-1)
+                    xi = trace.nodes[f"xi{t + 1}"]["value"].cpu()
                     run_xis.append(xi)
                     y = trace.nodes[f"y{t + 1}"]["value"].cpu().item()
                     run_ys.append(y)
@@ -183,10 +185,11 @@ class HiddenObjects(nn.Module):
                         print(f"xi{t + 1}: {xi}")
                         print(f" y{t + 1}: {y}")
 
-                run_df = pd.DataFrame(torch.stack(run_xis).numpy())
+                run_df = pd.DataFrame(torch.cat(run_xis).numpy())
                 run_df.columns = [f"xi_{i}" for i in range(self.p)]
-                run_df["observations"] = run_ys
-                run_df["order"] = list(range(1, self.T + 1))
+                run_df["observations"] = np.repeat(np.array(run_ys), self.n)
+                run_df["n"] = np.tile(range(self.n), self.T)
+                run_df["order"] = np.repeat(range(1, self.T + 1), self.n)
                 run_df["run_id"] = i + 1
                 output.append(run_df)
                 true_thetas.append(true_theta.numpy())
@@ -292,7 +295,7 @@ class DAD:
             design_net = BatchDesignBaseline(self.T, (self.n, self.p)).to(self.device)
         elif self.design_network_type == "random":
             design_net = RandomDesignBaseline(self.T, (self.n, self.p)).to(self.device)
-            num_steps = 0  # no gradient steps needed
+            self.num_steps = 0  # no gradient steps needed
         elif self.design_network_type == "dad":
             design_net = SetEquivariantDesignNetwork(
                 encoder, emitter, empty_value=torch.ones(self.n, self.p) * 0.01
@@ -353,6 +356,7 @@ class DAD:
             theta_loc=theta_prior_loc,
             theta_covmat=theta_prior_covmat,
             noise_scale=noise_scale_tensor,
+            n=self.n,
             p=self.p,
             K=self.K,
             T=self.T,
