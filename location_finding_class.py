@@ -35,8 +35,7 @@ class EncoderNetwork(nn.Module):
         self.softplus = nn.Softplus()
 
     def forward(self, xi, y, **kwargs):
-        xi = xi.flatten(-2)
-        inputs = torch.cat([xi, y], dim=-1)
+        inputs = torch.cat([xi.flatten(-2), y], dim=-1)
 
         x = self.linear1(inputs)
         x = self.relu(x)
@@ -95,12 +94,24 @@ class HiddenObjects(nn.Module):
         """Defines the forward map for the hidden object example
         y = G(xi, theta) + Noise.
         """
-        # two norm squared
-        sq_two_norm = (xi - theta).pow(2).sum(axis=-1)
-        sq_two_norm_inverse = (self.max_signal + sq_two_norm).pow(-1)
-        # sum over the K sources, add base signal and take log.
-        mean_y = torch.log(self.base_signal + sq_two_norm_inverse.sum(-1, keepdim=True))
-        return mean_y
+        mean_ys = []
+
+        for i in range(xi.shape[-2]):
+            xii = xi[..., i, :].unsqueeze(-2)
+
+            # two norm squared
+            sq_two_norm = (xii - theta).pow(2).sum(axis=-1)
+            sq_two_norm_inverse = (self.max_signal + sq_two_norm).pow(-1)
+
+            # sum over the K sources, add base signal and take log.
+            mean_y = torch.log(
+                self.base_signal + sq_two_norm_inverse.sum(-1, keepdim=True)
+            )
+            mean_ys.append(mean_y)
+
+        return torch.stack(mean_ys, axis=-1).squeeze(
+            -2
+        )  # returns dimension [samples, n]
 
     def model(self):
         if hasattr(self.design_net, "parameters"):
@@ -128,6 +139,10 @@ class HiddenObjects(nn.Module):
             ####################################################################
             mean = self.forward_map(xi, theta)
             sd = self.noise_scale
+            # var = self.noise_scale * torch.eye(xi.shape[-2])
+            # y = observation_sample(
+            #     f"y{t + 1}", dist.MultivariateNormal(mean, var).to_event(1)
+            # )
             y = observation_sample(f"y{t + 1}", dist.Normal(mean, sd).to_event(1))
 
             y_outcomes.append(y)
@@ -179,7 +194,7 @@ class HiddenObjects(nn.Module):
                 for t in range(self.T):
                     xi = trace.nodes[f"xi{t + 1}"]["value"].cpu()
                     run_xis.append(xi)
-                    y = trace.nodes[f"y{t + 1}"]["value"].cpu().item()
+                    y = trace.nodes[f"y{t + 1}"]["value"].cpu()  # .item()
                     run_ys.append(y)
                     if verbose:
                         print(f"xi{t + 1}: {xi}")
@@ -187,7 +202,7 @@ class HiddenObjects(nn.Module):
 
                 run_df = pd.DataFrame(torch.cat(run_xis).numpy())
                 run_df.columns = [f"xi_{i}" for i in range(self.p)]
-                run_df["observations"] = np.repeat(np.array(run_ys), self.n)
+                run_df["observations"] = np.array(run_ys).flatten()
                 run_df["n"] = np.tile(range(self.n), self.T)
                 run_df["order"] = np.repeat(range(1, self.T + 1), self.n)
                 run_df["run_id"] = i + 1
