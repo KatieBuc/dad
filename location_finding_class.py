@@ -72,6 +72,7 @@ class HiddenObjects(nn.Module):
         p=1,  # physical dimension
         K=1,  # number of sources
         T=2,  # number of experiments
+        x_discrete=None,
     ):
         super().__init__()
         self.design_net = design_net
@@ -89,6 +90,7 @@ class HiddenObjects(nn.Module):
         self.p = p  # dimension of theta (location finding example will be 1, 2 or 3).
         self.K = K  # number of sources
         self.T = T  # number of experiments
+        self.x_discrete = x_discrete
 
     def forward_map(self, xi, theta):
         """Defines the forward map for the hidden object example
@@ -113,6 +115,15 @@ class HiddenObjects(nn.Module):
             -2
         )  # returns dimension [samples, n]
 
+    def transform_xi(self, xi):
+        if self.x_discrete is None:
+            return xi
+
+        xi_close = find_closest_points(xi, self.x_discrete)
+        xi = repeat_tensor(xi, xi_close)
+
+        return xi
+
     def model(self):
         if hasattr(self.design_net, "parameters"):
             pyro.module("design_net", self.design_net)
@@ -127,15 +138,15 @@ class HiddenObjects(nn.Module):
         # T-steps experiment
         for t in range(self.T):
             ####################################################################
-            # Get a design xi; shape is [num-outer-samples x 1 x 1]
+            # Get a design xi; shape is [num-outer-samples x n x p]
             ####################################################################
             xi = compute_design(
                 f"xi{t + 1}", self.design_net.lazy(*zip(xi_designs, y_outcomes))
             )
-            # TODO: transform_design (from terresrial space to river)
+            xi = self.transform_xi(xi)  # TODO: what about the model trace?
 
             ####################################################################
-            # Sample y at xi; shape is [num-outer-samples x 1]
+            # Sample y at xi; shape is [num-outer-samples x n]
             ####################################################################
             mean = self.forward_map(xi, theta)
             sd = self.noise_scale
@@ -270,6 +281,7 @@ class DAD:
         n_trace=3,
         theta=None,
         verbose=True,
+        x_discrete=None,
     ):
         self.seed = seed
         self.num_steps = num_steps
@@ -293,6 +305,7 @@ class DAD:
         self.n_trace = n_trace
         self.theta = theta
         self.verbose = verbose
+        self.x_discrete = x_discrete
 
     def fit(self):
         pyro.clear_param_store()
@@ -375,6 +388,7 @@ class DAD:
             p=self.p,
             K=self.K,
             T=self.T,
+            x_discrete=self.x_discrete,
         )
 
         ### Set-up optimiser ###
@@ -446,3 +460,33 @@ class DAD:
         self.ho_model = ho_model
 
         return self
+
+
+def find_closest_points(xi, x_discrete):
+    # Calculate the Euclidean distance between xi and x_discrete
+    distance = torch.cdist(xi.float(), x_discrete.T.float())
+
+    # Find the indices of the closest points, xi has shape [..., n, p]
+    closest_indices = torch.argmin(distance, dim=-1).view(-1)[: xi.shape[-2]]
+
+    # Create a tensor of shape (n, p) with the closest points
+    closest_points = x_discrete[:, closest_indices]
+
+    return closest_points.T
+
+
+def repeat_tensor(xi, xi_close):
+    """Match dimensionality of xi_close to xi."""
+    xi_dims = xi.shape
+
+    if len(xi_dims) == 3:
+        # xi has shape (s, n, p)
+        xi_close = xi_close.unsqueeze(0).repeat(xi_dims[0], 1, 1)
+
+    elif len(xi_dims) == 4:
+        # xi has shape (q, s, n, p)
+        xi_close = (
+            xi_close.unsqueeze(0).unsqueeze(1).repeat(xi_dims[0], xi_dims[1], 1, 1)
+        )
+
+    return xi_close
